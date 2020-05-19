@@ -5,7 +5,7 @@ A collection of projects, assignments, and work to showcase my experience. For t
 This project utilized a variety of classification techniques to determine how well a team's seasonal statistics predict their playoff success in the post-season.
 
 ## BoardGameGeek
-Can the categorical descriptions and mechanics of popular board games illuminate meaningful trends or interesting connections between particular titles and their features? This project explore complexity, popularity, and game's thematical and mechanical features to explore tabletop board game trends.
+Can the categorical descriptions and mechanics of popular board games illuminate meaningful trends or interesting connections between particular titles and their features? This project explore complexity, popularity, and game's theme and mechanical features to explore tabletop board game trends.
 
 ## Starbucks
 How can Starbucks' customers be clustered into distinct customer profiles? What initial insights can be gleaned from how the K-means model separates these customers based on their level of income?
