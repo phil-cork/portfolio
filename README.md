@@ -1,5 +1,5 @@
 # Portfolio
-A collection of projects, assignments, and work to showcase my experience. For the visual presentation aspects of these projects, visit [my website](https//philcork.com/projects).
+A collection of projects, assignments, and work to showcase my experience. For the visual presentation aspects of these projects, visit [my website](https://philcork.com/projects).
 
 ## NFL Playoffs
 This project utilized a variety of classification techniques to determine how well a team's seasonal statistics predict their playoff success in the post-season.
