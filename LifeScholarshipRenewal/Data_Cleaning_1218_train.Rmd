@@ -1,0 +1,778 @@
+---
+title: "DATA CLEANING 12-18 train"
+output: html_notebook
+---
+
+This notebook cleans and combines several datasets into a comprehensive dataframe to predict LIFE scholarship eligibility. The data cleaning file expects five different folders of csv files for its input: classes, a folder of csv files detailing students’ class schedules, a folder of csv files containing students’ LIFE Eligibility and high school performance act and sat, two folders of csv files containing students’ test scores demographics, a folder of csv files containing the students demographic data
+
+##0.1 SET UP FILE READING FUNCTION
+```{r}
+require(plyr)
+#function that iterates through a folder and combines all csv files into a single dataframe
+#helfpul because raw data is in separate files according to aid year
+
+read_files <- function(path_to_files){
+  setwd(path_to_files)
+  files = list.files(path=path_to_files, pattern="*.csv")
+  data <- lapply(files, function(x) read.csv(x, header=TRUE, na.strings=c("", " ", "NA")))
+  all_data <- do.call("rbind.fill", data)
+  return(all_data)
+}
+  
+```
+
+##0.2 LOAD TRAINING DATA FILES
+```{r}
+require(plyr)
+#load data on college classes students are taking
+classes <- read_files("/Users/prcork/LIFE/ms-datasets/raw-data/classes/")
+#load dataset containing high school stats, eligibility indicator, etc.
+indicator <- read_files("/Users/prcork/LIFE/ms-datasets/raw-data/students/")
+
+#load ACT & SAT scores-- will be cleaned separately and merged in later
+act <- read_files("/Users/prcork/LIFE/ms-datasets/raw-data/ACT/")
+sat <- read_files("/Users/prcork/LIFE/ms-datasets/raw-data/SAT/")
+
+#load demographic data on students
+dem <- read_files("/Users/prcork/LIFE/ms-datasets/raw-data/demographics")
+```
+
+##1 AGGREGATE CLASS GRADES INTO AVERAGE DIFFICULTY
+
+To create an indication of a student’s upcoming schedule’s level of difficulty, this portion of the data cleaning process takes the entire training datasets course schedules for a given semester (fall, in this case) and creates an average GPA earned in each course. Then, it generates a metric called Difficulty, which weighs these average GPAs by the credit hours required for the given course. Finally, this Difficulty of a given schedule is averaged over the number of hours a student is taking to determine their semester’s holistic “Average Difficulty,” which has been determined to be a helpful predictor of student’s eligibility.
+```{r}
+require(plyr)
+require(dplyr)
+require(qdapTools)
+
+#keep only classes which are offered in the fall, which end in 10 (spring ends in 20)
+class_data <- classes[endsWith(as.character(classes$ACADEMIC_PERIOD), "10"),]
+
+#list all of the non-standard grades which aren't factored into standard GPA scale
+rem_courses <- c("XA", "XA-", "XB+", "XB", "XB-", "XC+", "XC", "XC-", "XD+", "XD", "XD-", "XF", "XXF",
+                 "RA", "RA-", "RB+", "RB", "RB-", "RC+", "RC", "RC-", "RD+", "RD", "RD-", "RF",
+                 "GA", "GA-", "GB+", "GB", "GB-", "GC+", "GC", "GC-", "GD+", "GD", "GD-", "GF",
+                 "NG", "TR", "S", "CP")
+#dont include the courses which don't result in standard GPA scale letter grades
+for (i in rem_courses) {
+  class_data <- class_data[which(class_data$FINAL_GRADE != i), ]
+}
+class_data <- class_data[which(class_data$COURSE_IDENTIFICATION != "TEDU205"),]
+class_data <- class_data[which(class_data$COURSE_IDENTIFICATION != "EDLS100"),]
+
+#Calculate Class Average GPA and Frequency
+
+#seperate completed courses (not withdrawn)
+class_comp <- class_data[which(class_data$COURSE_REGISTER_IND == "Y" & class_data$FINAL_GRADE != "WA" & class_data$FINAL_GRADE != "W"), ]
+
+#convert letter grades to GPA score
+cols <- c("COURSE_IDENTIFICATION", "FINAL_GRADE", "CREDITS_EARNED")
+class_comp <- class_comp[cols]
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "A", 4.0, 0.0)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "A-", 3.7, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "B+", 3.3, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "B", 3.0, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "B-", 2.7, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "C+", 2.3, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "C", 2.0, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "C-", 1.7, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "D+", 1.3, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "D", 1.0, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "D-", 0.7, class_comp$gpa)
+class_comp$gpa <- ifelse(class_comp$FINAL_GRADE == "F", 0.0, class_comp$gpa)
+
+#calculate difficulty, gpa score per credit hour of given course
+class_comp$diff <- class_comp$gpa * class_comp$CREDITS_EARNED
+
+#collect classes by their ID, take the mean of the GPA of each class
+class_agg <- aggregate(class_comp$gpa, list(class_comp$COURSE_IDENTIFICATION), mean)
+diff_agg <- aggregate(class_comp$diff, list(class_comp$COURSE_IDENTIFICATION), mean)
+
+#count the times each course appears to ensure GPA isn't weighted by low frequency results
+course_counts <- summarize(group_by(class_comp, COURSE_IDENTIFICATION), count=n())
+
+#standardize names, combine the average GPA and class frequency columns
+names(course_counts) <- c("Course_ID", "Count")
+names(class_agg) <- c("Course_ID", "Avg_gpa")
+class_agg <- merge(class_agg, course_counts)
+
+names(diff_agg) <- c("Course_ID", "Avg_diff")
+
+
+## Get Credits for Each Course ##
+
+credits_agg <- aggregate(class_comp$CREDITS_EARNED, list(class_comp$COURSE_IDENTIFICATION), max)
+names(credits_agg) <- c("Course_ID", "Course_Credit")
+
+
+## Class Withdrawn Frequency ###
+
+#separate withdrawn indicators, count the times each course appears
+class_with <- class_data[which(class_data$WITHDRAWN_IND == "Y" | class_data$FINAL_GRADE == "WA" | class_data$FINAL_GRADE == "W"), ]
+class_with <- class_with[3]
+with_counts <- summarize(group_by(class_with, COURSE_IDENTIFICATION), count=n())
+
+##standardize names, merge withdrawn count and the total count of classes found above
+names(with_counts) <- c("Course_ID", "Withdraw_Count")
+class_with <- merge(with_counts, course_counts)
+class_with$Withdraw_Percent <- round(class_with$Withdraw_Count/(class_with$Withdraw_Count+class_with$Count),3)
+
+
+## Combine GPA and Withdraw Percent, Add to Original Data Frame ##
+
+class_diff <- merge(class_agg, class_with, all.x=TRUE, all.y=TRUE)
+#set NAs to 0
+class_diff[is.na(class_diff)] <- 0
+class_diff <- merge(class_diff, diff_agg)
+class_diff <- merge(class_diff, credits_agg)
+#round GPA to two decimal places
+class_diff$Avg_gpa <- round(class_diff$Avg_gpa, 2)
+
+
+class_data$Avg_gpa <- lookup(terms = class_data$COURSE_IDENTIFICATION, 
+                             key.match = class_diff$Course_ID, 
+                             key.reassign = class_diff$Avg_gpa)
+
+class_data$withdraw_percent <- lookup(terms = class_data$COURSE_IDENTIFICATION, 
+                                      key.match = class_diff$Course_ID, 
+                                      key.reassign = class_diff$Withdraw_Percent)
+
+class_data$course_credit <- lookup(terms = class_data$COURSE_IDENTIFICATION,
+                                   key.match = class_diff$Course_ID,
+                                   key.reassign = class_diff$Course_Credit)
+
+class_data$difficulty <- lookup(terms = class_data$COURSE_IDENTIFICATION,
+                                   key.match = class_diff$Course_ID,
+                                   key.reassign = class_diff$Avg_diff)
+
+#aggregate by student ID num (one row per student)
+student_gpa <- aggregate(class_data$Avg_gpa, list(class_data$ID), mean)
+student_with <- aggregate(class_data$withdraw_percent, list(class_data$ID), mean)
+student_course <- aggregate(class_data$course_credit, list(class_data$ID), sum)
+student_diff <- aggregate(class_data$difficulty, list(class_data$ID), sum)
+
+#standardize column names for each datadrame
+names(student_with) <- c("ID", "Withdraw_Ratio")
+names(student_gpa) <- c("ID", "Avg_GPA")
+names(student_course) <- c("ID", "Credit_Hours")
+names(student_diff) <- c("ID", "Difficulty")
+
+student_with$Withdraw_Ratio <- round(student_with$Withdraw_Ratio, 3)
+
+#merge with indicator data
+df <- merge(indicator, student_with, by="ID", all.x=TRUE)
+df <- merge(df, student_course, by="ID", all.x=TRUE)
+df <- merge(df, student_diff, by="ID", all.x=TRUE)
+df <- merge(df, student_gpa, by="ID", all.x=TRUE)
+
+#create new column for Average Difficulty 
+df$Avg_Diff <- df$Difficulty / df$Credit_Hours
+```
+
+##2.1 AGGREGATE MIDTERM GPA
+Using similar techinques to the Average Difficulty steps, this chunk of code aggregates student’s midterm grades from the classes dataframe to use for training the model once the predicted cohort’s midterm grades have been posted.
+
+```{r}
+### 1. Setup ###
+
+require(plyr)
+require(dplyr)
+require(qdapTools)
+
+## Read in all class data files ##
+midterm_data <- classes
+midterm_data <- midterm_data[endsWith(as.character(classes$ACADEMIC_PERIOD), "10"),]
+
+## Remove all courses  which aren't given standard grades ##
+for (i in rem_courses) {
+  midterm_data <- midterm_data[which(midterm_data$MID_TERM_GRADE != i), ]
+  
+}
+midterm_data <- midterm_data[which(midterm_data$COURSE_IDENTIFICATION != "TEDU205"),]
+midterm_data <- midterm_data[which(midterm_data$COURSE_IDENTIFICATION != "EDLS100"),]
+
+## Set Withdraw Indicator based on Grades of W or WA ##
+for (i in nrow(midterm_data)) {
+  if(midterm_data[i,"MID_TERM_GRADE"] == "W" | midterm_data[i,"MID_TERM_GRADE"] == "WA") {
+    midterm_data[i,"WITHDRAWN_IND"] <- "Y"
+    midterm_data[i,"COURSE_REGISTER_IND"] <- "N"
+  }
+}
+
+### 2. Class Average GPA and Frequency ###
+
+## Separate Completed Courses (Not Withdrawn, Not Transfer Credits) ##
+midterm_ind <- midterm_data[which(midterm_data$COURSE_REGISTER_IND == "Y"), ]
+
+## Convert Letter Grades to GPA Scores ##
+cols <- c("ID", "COURSE_IDENTIFICATION", "MID_TERM_GRADE")
+midterm_ind <- midterm_ind[cols]
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "A", 4.0, 0.0)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "A-", 3.7, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "B+", 3.3, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "B", 3.0, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "B-", 2.7, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "C+", 2.3, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "C", 2.0, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "C-", 1.7, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "D+", 1.3, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "D", 1.0, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "D-", 0.7, midterm_ind$m_gpa)
+midterm_ind$m_gpa <- ifelse(midterm_ind$MID_TERM_GRADE == "F", 0.0, midterm_ind$m_gpa)
+
+#aggregate by student ID num (one row per student)
+student_gpa <- aggregate(midterm_ind$m_gpa, list(midterm_ind$ID), mean)
+
+#standardize column names for each datadrame
+names(student_gpa) <- c("ID", "Midterm_GPA")
+
+
+#merge with indicator data
+df <- merge(df, student_gpa, by="ID", all.x=TRUE)
+```
+
+## 2.2 AGGREGATE FALL FINAL GPA
+Repeat the above process for the Fall Final grades.
+```{r}
+### 1. Setup ###
+
+require(plyr)
+require(dplyr)
+require(qdapTools)
+## Read in all class data files ##
+
+fallfinal_data <- classes
+fallfinal_data <- fallfinal_data[endsWith(as.character(fallfinal_data$ACADEMIC_PERIOD), "10"),]
+
+## Set Withdraw Indicator based on Grades of W or WA ##
+## Needs to be redone in case they withdrew from classes since midterm grades posted
+for (i in nrow(fallfinal_data)) {
+  if(fallfinal_data[i,"FINAL_GRADE"] == "W" | fallfinal_data[i,"FINAL_GRADE"] == "WA") {
+    fallfinal_data[i,"WITHDRAWN_IND"] <- "Y"
+    fallfinal_data[i,"COURSE_REGISTER_IND"] <- "N"
+  }
+}
+
+### 2. Class Average GPA and Frequency ###
+
+## Separate Completed Courses (Not Withdrawn, Not Transfer Credits) ##
+fallfinal_ind <- fallfinal_data[which(fallfinal_data$COURSE_REGISTER_IND == "Y"), ]
+
+#remove all courses  which aren't given standard grades
+rem_courses <- c("XA", "XA-", "XB+", "XB", "XB-", "XC+", "XC", "XC-", "XD+", "XD", "XD-", "XF", "XXF",
+                 "RA", "RA-", "RB+", "RB", "RB-", "RC+", "RC", "RC-", "RD+", "RD", "RD-", "RF",
+                 "GA", "GA-", "GB+", "GB", "GB-", "GC+", "GC", "GC-", "GD+", "GD", "GD-", "GF",
+                 "NG", "TR", "S", "CP")
+for (i in rem_courses) {
+  fallfinal_ind <- fallfinal_ind[which(fallfinal_ind$FINAL_GRADE != i), ]
+}
+fallfinal_ind <- fallfinal_ind[which(fallfinal_ind$COURSE_IDENTIFICATION != "TEDU205"),]
+fallfinal_ind <- fallfinal_ind[which(fallfinal_ind$COURSE_IDENTIFICATION != "EDLS100"),]
+
+## Convert Letter Grades to GPA Scores ##
+cols <- c("ID", "COURSE_IDENTIFICATION", "FINAL_GRADE")
+fallfinal_ind <- fallfinal_ind[cols]
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "A", 4.0, 0.0)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "A-", 3.7, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "B+", 3.3, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "B", 3.0, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "B-", 2.7, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "C+", 2.3, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "C", 2.0, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "C-", 1.7, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "D+", 1.3, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "D", 1.0, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "D-", 0.7, fallfinal_ind$ff_gpa)
+fallfinal_ind$ff_gpa <- ifelse(fallfinal_ind$FINAL_GRADE == "F", 0.0, fallfinal_ind$ff_gpa)
+
+#aggregate by student ID num (one row per student)
+student_gpa <- aggregate(fallfinal_ind$ff_gpa, list(fallfinal_ind$ID), mean)
+
+#standardize column names for each datadrame
+names(student_gpa) <- c("ID", "FallFinal_GPA")
+
+
+#merge with indicator data
+df <- merge(df, student_gpa, by.x="ID", by.y="ID")
+
+```
+
+##3 CONVERT SAT & ACT ACROSS TEST YEARS AND COMBINE TO ONE METRIC
+
+Given the changing of scoring models in the SAT in 2015, the code checks for which type of scores are available and transforms them into the new grading scale. It then compares, where available, the SAT and an SAT scaled ACT score, and chooses the higher of the two.
+
+```{r}
+#load evidence-based reading & writing score conversion file
+ebrw <- read.csv("/Users/prcork/LIFE/LIFE Scholarship Renewal/old_to_new_SAT_EBRW_1.csv")
+#rename columns
+names(ebrw) <- c("oldReadPlusWrite","newEBRW","X")
+ebrw <- ebrw[c("oldReadPlusWrite","newEBRW")]
+
+#load math score conversion file
+math <- read.csv("/Users/prcork/LIFE/LIFE Scholarship Renewal/old_to_new_SAT_math.csv")
+#rename columns
+names(math) <- c("oldMath", "newMath")
+math <- math[c("oldMath", "newMath")]
+#math
+```
+
+```{r}
+#install.packages("tidyr")
+library(dplyr)
+library(tidyr)
+#load all sat score data
+all_sat <- sat
+
+#subset for just aid years up to 1516
+sat_old <- all_sat[which(!(all_sat$AID_YEAR > 1516)),]
+
+#convert test name to columns
+sat_old <- sat_old %>%
+  group_by(TEST_NAME) %>%
+  mutate(grouped_id = row_number())
+sat_old <- sat_old %>%
+  spread(TEST_NAME, TEST_SCORE) %>%
+  select(-grouped_id)
+sat_old <- aggregate(sat_old[c('SAT Mathematics', 'SAT Verbal', 'SAT Writing')], list(sat_old$ID), mean, na.rm=TRUE)
+names(sat_old$Group.1) = "ID"
+sat_old[duplicated(sat_old$ID),]
+#sat_old
+```
+
+```{r}
+#import 1617 & 1718 SAT scores 
+
+#read in 1617 scores
+sat_1617 <- read.csv("/Users/prcork/LIFE/ms-datasets/raw-data/SAT/LIFE Renewal Project v2 - SAT CB_1617.csv")
+
+#convert test name to columns instead of rows
+## merge / full join instead of mutating
+sat_1617 <- sat_1617 %>%
+  group_by(AID_YEAR,TEST_NAME) %>%
+  mutate(grouped_id = row_number())
+sat_1617 <- sat_1617 %>%
+  spread(TEST_NAME, TEST_SCORE) %>%
+  select(-grouped_id)
+
+#datatype conversions for scores
+sat_1617$`EVIDENCE-BASED READ/WRIT SCORE` = as.integer(as.character(sat_1617$`EVIDENCE-BASED READ/WRIT SCORE`))
+sat_1617$`MATH SECTION SCORE` = as.integer(as.character(sat_1617$`MATH SECTION SCORE`))
+sat_1617$`SAT Mathematics` = as.integer(as.character(sat_1617$`SAT Mathematics`))
+sat_1617$`SAT Verbal` = as.integer(as.character(sat_1617$`SAT Verbal`))
+sat_1617$`SAT Writing` = as.integer(as.character(sat_1617$`SAT Writing`))
+
+#head(sat_1617)
+
+#subset scores from new SAT test (those with no score for EBRW section)
+#first add EBRW score to math score to get total 
+sat_1617_new <- aggregate(sat_1617[c('EVIDENCE-BASED READ/WRIT SCORE','MATH SECTION SCORE')], list(sat_1617$ID), FUN=mean, na.rm=TRUE)
+sat_1617_new <- sat_1617_new[which(!is.nan(sat_1617_new$`EVIDENCE-BASED READ/WRIT SCORE`)),]
+
+#subset scores from old SAT scores and keep only relevant columns
+#first add math, verbal, and writing scores to get total 
+sat_1617_old <- aggregate(sat_1617[c("SAT Mathematics", "SAT Verbal", "SAT Writing")], list(sat_1617$ID), FUN=mean, na.rm=TRUE)
+sat_1617_old <- sat_1617_old[which(!sat_1617_old$`SAT Mathematics`==0),]
+
+#rename ID columns
+names(sat_1617_new$Group.1) = "ID"
+names(sat_1617_old$Group.1) = "ID"
+
+#read in 1718 scores
+sat_1718 <- read.csv("/Users/prcork/LIFE/ms-datasets/raw-data/SAT/LIFE Renewal Project v2 - SAT CB_1718.csv")
+
+#convert test name to columns instead of rows
+sat_1718 <- sat_1718 %>%
+  group_by(AID_YEAR,TEST_NAME) %>%
+  mutate(grouped_id = row_number())
+sat_1718 <- sat_1718 %>%
+  spread(TEST_NAME, TEST_SCORE) %>%
+  select(-grouped_id)
+
+#subset scores from new SAT test (those with no score for EBRW section)
+#first add EBRW score to math score to get total 
+sat_1718_new <- aggregate(sat_1718[c('EVIDENCE-BASED READ/WRIT SCORE','MATH SECTION SCORE')], list(sat_1718$ID), FUN=mean, na.rm=TRUE)
+sat_1718_new <- sat_1718_new[which(!sat_1718_new$`EVIDENCE-BASED READ/WRIT SCORE`==0),]
+sat_1718_old <- aggregate(sat_1718[c("SAT Mathematics", "SAT Verbal", "SAT Writing")], list(sat_1718$ID), FUN=mean, na.rm=TRUE)
+
+#subset scores from old SAT scores and keep only relevant columns
+#first add math, verbal, and writing scores to get total 
+sat_1718_old <- sat_1718_old[which(!sat_1718_old$`SAT Mathematics`==0),]
+
+#rename ID columns
+names(sat_1718_new$Group.1) = "ID"
+names(sat_1718_old$Group.1) = "ID"
+
+#read in 1718 scores
+sat_1819 <- read.csv("/Users/prcork/LIFE/ms-datasets/raw-data/SAT/LIFE Renewal Project v2 - SAT CB_1819.csv")
+
+#convert test name to columns instead of rows
+sat_1819 <- sat_1819 %>%
+  group_by(AID_YEAR,TEST_NAME) %>%
+  mutate(grouped_id = row_number())
+sat_1819 <- sat_1819 %>%
+  spread(TEST_NAME, TEST_SCORE) %>%
+  select(-grouped_id)
+
+#subset scores from new SAT test (those with no score for EBRW section)
+#first add EBRW score to math score to get total 
+sat_1819_new <- aggregate(sat_1819[c('EVIDENCE-BASED READ/WRIT SCORE','MATH SECTION SCORE')], list(sat_1819$ID), FUN=mean, na.rm=TRUE)
+sat_1819_new <- sat_1819_new[which(!sat_1819_new$`EVIDENCE-BASED READ/WRIT SCORE`==0),]
+sat_1819_old <- aggregate(sat_1819[c("SAT Mathematics", "SAT Verbal", "SAT Writing")], list(sat_1819$ID), FUN=mean, na.rm=TRUE)
+
+#subset scores from old SAT scores and keep only relevant columns
+#first add math, verbal, and writing scores to get total 
+sat_1819_old <- sat_1819_old[which(!sat_1819_old$`SAT Mathematics`==0),]
+
+#rename ID columns
+names(sat_1819_new$Group.1) = "ID"
+names(sat_1819_old$Group.1) = "ID"
+```
+
+```{r}
+library(plyr)
+#append old scores from 1617 to old scores from 1718 
+sat_1619_old <- rbind.fill(sat_1617_old, sat_1718_old, sat_1819_old)
+names(sat_1619_old) <- c("ID", "SAT Mathematics", "SAT Verbal", "SAT Writing")
+
+
+#check for duplicate IDs
+sat_1619_old[duplicated(sat_1619_old$ID),]
+sat_1619_old[which(sat_1619_old$ID==20096744),]
+sat_1619_old[which(sat_1619_old$ID==20108887),]
+
+#append 1619 entries to the rest of the old scores
+sat_old <- rbind.fill(sat_old, sat_1619_old)
+#order by ID
+sat_old[order(sat_old$ID),]
+#remove duplicates
+sat_old <- sat_old[!duplicated(sat_old$ID),]
+nrow(sat_old)
+
+#store new sat scores in sat_new
+## no NAs at this point
+sat_new <- rbind.fill(sat_1617_new, sat_1718_new, sat_1819_new)
+```
+
+```{r}
+#add SAT verbal & math scores together to get total SAT score
+sat_old_verb_write <- sat_old[c("SAT Verbal","SAT Writing")]
+## THIS GOES UP TO 1570, BUT 'oldReadPlusWrite only goes up to 800
+sat_old$verb_write <- apply(sat_old_verb_write, MARGIN=1, FUN=sum)
+
+#convert attribute to character type
+ebrw$oldReadPlusWrite <- as.character(ebrw$oldReadPlusWrite)
+
+#create column 'converted_ebrw' that matches verb_write to oldReadPlusWrite
+#fills with the new score conversion if match is present, fills with 0 otherwise
+sat_old = mutate(sat_old, converted_ebrw = ifelse(!is.na(ebrw[match(sat_old$verb_write, ebrw$oldReadPlusWrite),1]), ebrw[match(sat_old$verb_write, ebrw$oldReadPlusWrite),2], 0))
+
+#create column 'converted_math' that matches math to oldMath 
+#fills with the new score conversion if match is present, fills with 0 otherwise
+sat_old = mutate(sat_old, converted_math = ifelse(!is.na(math[match(sat_old$`SAT Mathematics`, math$oldMath),1]), math[match(sat_old$`SAT Mathematics`, math$oldMath), 2], 0))
+
+names(sat_old$Group.1) <- "ID"
+
+#sat_old
+```
+
+```{r}
+#subset sat_old for merging
+sat_old_merge <- sat_old[c("ID","converted_ebrw","converted_math")]
+#rename columns properly
+names(sat_old_merge) <- c("ID", "EBRW", "Math")
+sat_old_merge$EBRW = as.integer((sat_old_merge$EBRW))
+
+#rename columnns of new SAT scores to match old column names
+names(sat_new) <- c("ID", "EBRW", "Math")
+
+#append new and converted old scores together
+sat_all <- rbind.fill(sat_old_merge, sat_new)
+
+#rename columns
+names(sat_all) <- c("ID", "SAT_EBRW", "SAT_Math")
+
+#take each student's max score on EBRW & Math
+sat_all <- aggregate(sat_all[c("SAT_EBRW","SAT_Math")], by=list(sat_all$ID), FUN=max)
+
+
+
+
+#create 'total_SAT' column by adding EBRW score to Math score
+sat_all$total_SAT <- apply(sat_all[c("SAT_EBRW","SAT_Math")], MARGIN=1, FUN=sum)
+names(sat_all) <- c("ID", "SAT_EBRW","SAT_Math","total_SAT")
+
+#sat_all
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+#convert scores from rows to columns based on TEST_NAME
+## result of this transformation is a row for each ID and different test score with the rest as NA
+act <- act %>%
+  group_by(TEST_NAME) %>%
+  dplyr::mutate(grouped_id = row_number())
+act <- act %>%
+  spread(TEST_NAME, TEST_SCORE) %>%
+  select(-grouped_id)
+
+#add all rows of same ID together (consolidates to one row per ID)
+## here ACT Composite seems to disappear?
+act <- aggregate(act[c("ACT Composite", "ACT English", "ACT Math", "ACT Reading", "ACT Science Reasoning", "ACT Writing", "ACT Combined English/Writing")], list(act$ID), sum, na.rm=TRUE)
+
+#rename 1st column to ID
+names(act) <- c("ID", "ACT Composite", "ACT English", "ACT Math", "ACT Reading", "ACT Science Reasoning", "ACT Writing", "ACT Combined English/Writing")
+#act
+```
+
+```{r}
+#use ACT scores to fill in for missing SAT scores
+
+#merge test scores together by student ID
+merged <- merge(sat_all, act, by="ID", all=TRUE)
+#find rows with missing SAT scores
+## why is this made, never used elsewhere?
+missing_sats <- merged[is.na(merged$SAT_EBRW),]
+
+#extract relevant columns
+## 	grabs ID, total_SAT, ACT English??
+scores <- merged[c("ID","total_SAT","ACT Composite")]
+
+#load score conversion table
+scoreConversions <- read.csv('/Users/prcork/LIFE/LIFE Scholarship Renewal/ACT-SAT-Concordance-Tables.csv')
+
+#where SAT total is missing, replace with ACT composite score
+## where does ACT composite come from?
+scores = mutate(scores, sat_total = ifelse(is.na(scores$total_SAT), scoreConversions[match(scores$`ACT Composite`, scoreConversions$ACT),2], scores$total_SAT))
+
+converted_act <- scoreConversions
+names(converted_act) <- c("ACT", "Converted ACT")
+scores <- merge(scores, converted_act, by.x="ACT Composite", by.y="ACT")
+scores$top_scores <- pmax(scores$sat_total, scores$`Converted ACT`)
+
+#extract just ID and combined test score
+testScore <- scores[c("ID","sat_total")]
+#rename score column
+names(testScore) <- c("ID","test_score")
+
+#merge with rest of dataframe
+df <- merge(df, testScore, by="ID", all.x=TRUE)
+
+#current df includes indicator dataset, binary course enrollment, and combined test score
+
+```
+
+##4 MERGE IN HIGH SCHOOL NICHE DATA
+Using the “All High Schools” file, bring in school’s niche grades and merge it with the student’s dataset based on their high schools ID.
+```{r}
+library(plyr)
+#read in full dataset of all high schools from database
+all_hs <- read.csv('/Users/prcork/LIFE/LIFE Scholarship Renewal/ms-datasets/All High Schools.csv')
+#preview high school dataset
+head(all_hs)  
+
+#iteratively read files of student data
+stud_hs <- indicator
+
+#select only student ID, high school unique identifier, and high school name
+stud_hs <- stud_hs[c("ID", "High.School.Unique.Identifier", "High.School.Name")]
+#preview student dataset
+#head(stud_hs)
+```
+
+```{r}
+#merge all high school data with student data
+#keep all students (all.x=TRUE) and merge on HS unique identifier
+merged <- merge(stud_hs, all_hs, all.x=TRUE, by.x="High.School.Unique.Identifier", by.y="CEEB.Code")
+
+#remove unneccessary columns
+merged <- merged[c("ID","Sub.Type", "Niche.Grade","Senior.Class.Size")]
+#merged
+```
+
+```{r}
+#convert niche grades to numbers from 0-11, 0 being A+ and 11 being D-
+grades <- c("A"=1, "A-"=2, "A+"=0, "B+"=3, "B"=4, "B-"=5, "C+"=6, "C"=7, "C-"=8, "D+"=9, "D"=10, "D-"=11)
+merged$Niche.Grade = revalue(merged$Niche.Grade, grades)
+```
+
+```{r}
+#create binary column for public school 
+merged <- mutate(merged, public_school=ifelse(merged$Sub.Type=="Public", 1, 0))
+```
+
+```{r}
+#finalize dataset by removing high school name column
+hs_grades <- merged[c("ID","Niche.Grade","Senior.Class.Size","public_school")]
+#preview dataset
+head(hs_grades)
+
+#merge with rest of dataframe
+df<- merge(df, hs_grades, by="ID", all.x=TRUE)
+
+#current df includes indicator dataset, binary course enrollment, combined test score, and high school Niche Rankings
+```
+
+MERGE IN ZIP CODE DATA FROM AMERICAN COMMUNITY SURVEY
+```{r}
+#load dataset
+zip_stats <- read.csv('/Users/prcork/LIFE/LIFE Scholarship Renewal/ms-datasets/acs_zip_code_stats.csv')
+
+#change postal code to just first 6 chars in df
+df <- mutate(df, POSTAL_CODE = substr(POSTAL_CODE, 1,5))
+
+#merge on student zip code
+df <- merge(df, zip_stats, by.x="POSTAL_CODE", by.y="zip_code", all.x=TRUE)
+
+#current df includes indicator dataset, binary course enrollment, combined test score, high school Niche Rankings, and ACS zip code data
+
+```
+
+MERGE IN DEMOGRAPHIC DATA
+```{r}
+df <- merge(df, dem, by="ID", all.x=TRUE)
+
+#map parent highest grade level to numeric representation
+map <- c("high school"=2, "College or beyond"=3, "middle school/junior high"=1,"None"=NaN, "other/unknown"=NaN)
+df$FATHER_HIGHEST_GRADE <- as.numeric(revalue(df$FATHER_HIGHEST_GRADE, map))
+df$MOTHER_HIGHEST_GRADE <- as.numeric(revalue(df$MOTHER_HIGHEST_GRADE, map))
+```
+
+MERGE IN AP DATA
+```{r}
+#read in combined AP Test data
+#includes student ID, Aid Year, Count of Tests Taken, and Count of Tests with a Score of 3 or higher
+ap <- read.csv("/Users/prcork/LIFE/ap_count_total.csv")
+
+#merge the two datasets by common values (ID, Aid Year) and keep all rows from df even if not present in ap
+df <- merge(df, ap, all.x =TRUE)
+
+# if NA, set ap values to 0, as they did not report them to CofC
+df$AP_COUNT[is.na(df$AP_COUNT)] <- 0
+df$AP_CREDIT[is.na(df$AP_CREDIT)] <- 0
+
+```
+
+ CREATE BINS FOR PARENT INCOME
+```{r}
+#generate sequence from 0 to max parent income, increasing by $15k each time
+breaks <- c(seq(0, max(df$PARENT_ADJUSTED_GROSS_INCOME, na.rm=T), 15000),Inf)
+
+#cut data based on breaks and assign vals to income_bin 
+df$income_bin <- cut(df$PARENT_ADJUSTED_GROSS_INCOME, breaks, labels=c(1:136))
+```
+
+ADD OTHER COLUMNS THROUGH CALCULATIONS
+```{r}
+#calcualte hs rank percentile
+df$hs_pct <- round((df$SCHOOL_SIZE - df$HIGH_SCHOOL_RANK)/df$SCHOOL_SIZE, 2)
+
+#binarize gender
+df <- mutate(df, female=ifelse(df$GENDER=='F', 1, 0))
+
+#generate application & acceptance months
+#assumes date format is month/day/full-year ie 10/1/2011
+#install.packages('lubridate')
+library(lubridate)
+df <- mutate(df, app_month= month(as.Date(df$APPLICATION_DATE, "%m/%d/%Y")))
+df <- mutate(df, acc_month= month(as.Date(df$Acceptance.Date, "%m/%d/%Y")))
+
+df$rank_percentage <- df$HIGH_SCHOOL_RANK / df$SCHOOL_SIZE
+
+```
+
+##5 FINAL DATA PROCESSES
+The final transformations include dropping the columns not used in the final dataset, converting the datatypes of several features, imputing the missing values in the remaining columns, and finally outputing the resulting dataframe as a .csv file which can then be imported as the train data into the classification model R script.
+
+DROP UNNECESSARY COLUMNS
+Use the formatting below to comment out Midterm and Final grades depending on which training dataset you are creating. 
+```{r}
+#create list of attributes for final dataframe
+keep = c("LIFE.Eligible", "ID", "AID_YEAR.x", "HIGH_SCHOOL_RANK", "HIGH_SCHOOL_GPA", "test_score", "female", "SCHOOL_SIZE", "Niche.Grade", "public_school", "AP_COUNT", "AP_CREDIT", "app_month", "acc_month", "med_hh_income", "med_home_value", "PARENT_ADJUSTED_GROSS_INCOME", "pct_rural", "MOTHER_HIGHEST_GRADE", "FATHER_HIGHEST_GRADE", "income_bin", "EFC", "Withdraw_Ratio", "Avg_Diff", "rank_percentage"
+         ,"Midterm_GPA"
+         ,"FallFinal_GPA"
+         )
+
+df <- df[keep]
+
+```
+
+CONVERT ALL TYPES TO NUMERIC
+```{r}
+df
+df$Niche.Grade <- as.numeric(df$Niche.Grade)
+df$med_hh_income <- as.numeric(df$med_hh_income)
+df$med_home_value <- as.numeric(df$med_home_value)
+df$pct_rural <- as.numeric(df$pct_rural)
+df$MOTHER_HIGHEST_GRADE <- as.numeric(df$MOTHER_HIGHEST_GRADE)
+df$FATHER_HIGHEST_GRADE <- as.numeric(df$FATHER_HIGHEST_GRADE)
+df$income_bin <- as.numeric(df$income_bin)
+
+#extract just first year from AID YEAR
+df <- mutate(df, AID_YEAR=as.numeric(substr(as.factor(df$AID_YEAR.x), 0,2)))
+df <- df[,!(names(df) %in% c('AID_YEAR.x'))]
+
+#convert life eligibility to binary numeric
+df <- mutate(df, LIFE.Eligible=ifelse(df$LIFE.Eligible=="Y",1,0))
+(df)
+
+#remove duplicated IDs (possible result from merging datasets)
+df <- df[!duplicated(df$ID),]
+nrow(df)
+```
+
+IMPUTE MISSING VALUES
+This process separates features into categorically similar bins and then imputes missing values based on those attributes in which data is not missing before merging them all back together into a complete dataset with no nas.
+```{r}
+library(randomForest)
+
+performance <- c("LIFE.Eligible", "ID", "public_school", "HIGH_SCHOOL_GPA", "HIGH_SCHOOL_RANK", "SCHOOL_SIZE", 
+                 "test_score", "AP_COUNT", "AP_CREDIT", "rank_percentage")
+perf_df <- df[performance]
+perf_df <- rfImpute(LIFE.Eligible~., data=perf_df, iter=1)
+
+
+#impute missing data based on demographic data
+demographics <- c("LIFE.Eligible", "ID", "EFC", "PARENT_ADJUSTED_GROSS_INCOME", "med_home_value", "med_hh_income", "pct_rural",
+                  "income_bin", "MOTHER_HIGHEST_GRADE", "FATHER_HIGHEST_GRADE", "female", "Niche.Grade")
+demo_df <- df[demographics]
+demo_df <- rfImpute(LIFE.Eligible~., data=demo_df, iter=1)
+
+#collect remaining attributes based on college data
+college <- c("ID", "AID_YEAR", "app_month", "acc_month", "Withdraw_Ratio", "Avg_Diff", "Midterm_GPA", "FallFinal_GPA")
+col_df <- df[college]
+df$AID_YEAR <- as.factor(df$AID_YEAR)
+
+#merge imputed dataframes together
+temp_df <- merge(col_df, demo_df, row.names=FALSE)
+temp_df <- merge(temp_df, perf_df, row.names=FALSE)
+df <- temp_df
+
+#with imputation compelte, remove redundant or insignificant data points
+df$PARENT_ADJUSTED_GROSS_INCOME <- NULL
+df$public_school <- NULL
+
+### Prepare final dataframe & train model ###
+
+df <- rfImpute(LIFE.Eligible~., data=df, iter=1)
+
+df$LIFE.Eligible <- ifelse(df$LIFE.Eligible==1, "Eligible", "Ineligible")
+
+# NOTE: make sure to comment out Midterm.GPA / FallFinal.GPA when not using them
+names(df) <- c("LIFE.Eligible", "ID", "Aid_Year", "App.Month", "Acc.Month", "Withdraw.Ratio",
+               "Avg.Difficulty",
+               "Midterm.GPA",
+               "FallFinal.GPA",
+               "EFC", "Med.Home.Value", "Med.HH.Income", "Pct.Rural",
+               "Income.Bin", "Mother.Highest.Grade", "Father.Highest.Grade", "Female", "Niche.Grade",
+               "High.School.GPA", "High.School.Rank", "School.Size", "Test.Score",
+               "AP.Count", "AP.Credit", "Rank.Pct")
+```
+
+SAVE DF TO CSV FILE
+Make sure to save the name based on which time period the training file is for and include the date for posterity.
+```{r}
+setwd("/Users/prcork/LIFE/")
+write.csv(df, 'LIFE_dataset_1218_ff_train_0508.csv', row.names = FALSE)
+```
