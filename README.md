@@ -1,7 +1,7 @@
 # Portfolio
 A collection of projects, assignments, and work to showcase my experience. For the visual presentation aspects of these projects, visit [my website](https://philcork.com/projects).
 
-## LifeScholarship Renewal
+## LifeScholarshipRenewal
 As a Data Modeler for the Office of Enrollment Information, I worked to use incoming student applications and upcoming semester schedules to identify students at risk of losing their scholarship eligibility. These scripts show the data cleaning and model tuning and training processes.
 
 ## NFL
