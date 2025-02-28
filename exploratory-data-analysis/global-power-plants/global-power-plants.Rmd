@@ -1,0 +1,184 @@
+---
+title: "EDA: Global Power Plants"
+author: "Phil Cork"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Global Power Plants
+
+This notebook investigates a dataset of Global Power Plants to demonstrate data visualization techniques using `ggplot`.
+
+This dataset is broad in scope, which can be helpful for drawing general trends across various regions and the types of fuel used to generate power. With that in mind, it should also be analyzed with the caveat that it is far from representative. This reality is particularly true when it comes to measuring power generation - this dataset only represents about 30% of all produced Solar energy, as only one example. Even so, we can use it to evaluate other important metrics like the capacity of various facilities and their relationship to the expansion of renewable energy facilities over time.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+
+library(tidyverse)
+library(countrycode)
+library(scales)
+library(ggrepel)
+library(extrafont)
+```
+
+```{r}
+db <- read.csv("global_power_plant_database.csv")
+```
+
+```{r}
+# Pre-add continent
+# pull out the country column from origin data as a vector
+db$continent <- countrycode(sourcevar = db$country,
+                            origin = 'iso3c', # naming convention of the origin data 
+                            destination = "continent") # name of new var to create
+
+# Add continent for missing data # Add a renewable energy flag
+db <- db %>%
+   mutate(continent = case_when(country_long == "Antarctica" ~ "Antarctica",
+                                country_long == "Kosovo" ~ "Europe",
+                                TRUE ~ continent)) %>%
+  mutate(renewable=ifelse(primary_fuel %in% c("Solar", "Hydro", "Wind", "Biomass", "Geothermal", "Wave and Tidal"), 
+                          "Renewable Energy", "Non-Renewable Energy"))
+```
+
+#### Histogram of Commissioned Power Plants
+
+To get a sense of the scale of the data, we first consider the rate at which these power plants were commissioned. We denote an unsurprising escalation in power plants coming online around the world from the 1960s through the 2000s and then a massive surge in expansion across the 2010s. Given this dataset only contains a few years worth of data for the 2020s, it is likely the dramatic increase will continue, potentially setting a new baseline trend.
+
+```{r}
+ggplot(db, aes(commissioning_year)) + 
+  geom_histogram(binwidth=10, na.rm=TRUE) + # remove outliers and set binwidth to 10 years
+  labs(title="Global facilities rapidly expand during the 2010s", subtitle="Power Plants Commissioned by Decade", x="Commissioning Year", y="Count of Facilities") + 
+  theme_minimal()
+```
+
+#### Power Plants by Source
+
+Considering the number of power plants over time, we next consider the distribution of their primary fuel type and whether they are categorized as a renewable energy source or not. This plot shows that in terms of their frequency, renewable energy sources lead the way with Solar, Hydro, and Wind being the three most common types of power plants. Solar, in particular, is included in the dataset twice as often as Gas, the most frequent non-renewable energy source.
+
+```{r}
+# store the count and the max of the binary variable for filtering by renewable or not
+q4 <- db %>%
+  group_by(primary_fuel) %>%
+  summarize(n=n(), renewable=max(renewable)) 
+
+ggplot(q4, aes(x=n, y=reorder(primary_fuel,n), fill=renewable)) + # reorder by n
+  geom_bar(stat="identity") + 
+  labs(x="Count of Facilities", y="Primary Fuel of Power Plant", 
+       title="Renewable Energy Powers Most Plants", 
+       subtitle="Count of Power Plants by Primary Fuel") + 
+  scale_fill_manual(values=c("black", "darkgreen"), name="") + 
+  theme_minimal()
+```
+
+#### Facilities By Continent
+
+Gathering each type of power plant by whether it uses renewable or non-renewable energy shows that across each continent, renewable energy plants are more common than non-renewable energy power plants. It also highlights the variety in total power plants across each continent with the Americas leading in both renewables and non-renewables, though the lead is much higher in the former category. The Americas contain twice as many non-renewable power plants than the next closest continent, Asia.
+
+```{r}
+q5 <- db %>%
+  group_by(continent, renewable) %>%
+  summarize(count=n(), renewable=max(renewable)) # as above, but switch group_by variable
+
+ggplot(q5, aes(x=continent, y=count, fill=renewable)) +
+  geom_bar(position='dodge', stat="identity") + # stack bars for the x and y included in aesthetics above
+  labs(x="", y="Facilities", title="Renewable Energy More Common Across Each Continent",
+       subtitle="Number of facilities per continent, renewable and non-renewable") + 
+  scale_fill_manual(values=c("black", "darkgreen"), name="") + # set colors and remove legend title
+  geom_text(aes(label=count), position=position_dodge(width=0.9), vjust=-0.25) + # place text above bars
+  theme_minimal() 
+```
+
+#### Proportion of Facilities by Source in each Continent
+
+This plot presents the same information as above, but presents it as rounded proportions rather than the raw number of facilities. These percent values highlight the trend that across each continent, renewable energy plants are the majority of all power plants captured in the data.
+
+```{r}
+by_cont_total <- q5 %>%
+  group_by(continent) %>%
+  summarize(total=sum(count)) # from previous question, add up to counts stored
+
+q6 <- merge(q5, by_cont_total) # merge for easier plotting
+
+q6$proportion <- round((q6$count/q6$total)*100,0) # transform to a proportion
+
+renewable_proportion <- q6 %>%
+  filter(renewable == "Renewable Energy") %>%
+  select(continent, proportion) %>%
+  rename(renewable_proportion = proportion)
+
+q6 <- q6 %>%
+  left_join(renewable_proportion, by="continent")
+
+# nb: while it might be preferable to use position='fill' in the below plot, creating the proportion variable allows for easier implementation of the text value such that stacking proportions is the same result as a fill, but with a more intuitive display.
+
+ggplot(q6, aes(y=reorder(continent, renewable_proportion) , x=proportion, fill=renewable)) + # plot proportions by continents filtered by renewable
+  geom_bar(position='stack', stat="identity") + 
+  labs(y="", x="Proportions of Facilities", 
+       title="Majority of Plants Across Each Continent Use Renewable Energy",
+       subtitle="Proportion of renewable energy to non-renewable energy plants") + 
+  scale_fill_manual(values=c("black", "darkgreen"), name="") + 
+  geom_text(aes(label=paste0(proportion,"%")), color = "white", position=position_stack(vjust=.5)) + # add % to value and place text in the middle of the stacked bar
+  theme_minimal() + 
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+#### Boxplot of Capacity
+
+With the frequency of renewable energy power plants clearly established, we turn our attention to their comparative capacity. Considering the two broad categories, non-renewables tend to outpace renewables in terms of power plant capacity, particularly when considering the median capacity values. The interquartile range whiskers suggest there is some volatility with many of the fuel types, particularly Coal, Hydro, and Solar, which feature the most outliers.
+
+```{r}
+
+# store the median values for capacity for each type of fuel to merge in for easier plotting
+medians <- db %>%
+  select(capacity_mw, primary_fuel) %>%
+  group_by(primary_fuel) %>%
+  summarize(med_capacity=median(capacity_mw))
+
+q3 <- merge(db, medians)
+
+# use the newly stored median value to reorder the primary_fuel categories
+ggplot(q3, aes(x=log10(capacity_mw), y=reorder(primary_fuel, med_capacity), fill=renewable)) + 
+  scale_fill_manual(values=c("black", "darkgreen"), name="") + 
+  geom_boxplot(na.rm=TRUE, color="darkgrey") + 
+  labs(x="Capacity (in MegaWatts)", y="Fuel Type", title="Renewable Energy Trails Traditional Energy Sources in Capacity", subtitle="Global power plant capacity by primary fuel") + 
+  theme_minimal()
+
+```
+
+#### Scatterplot of Average Capacity by Continnent
+
+By evaluating the distribution of plants by continent, average capacity and frequency in a given region, a few trends come into view. As denoted above, the renewable energy facilities are much more frequent, but with a lower average capacity. In contrast, each continent that has at least one Nuclear power plant sees the highest average capacity from this source, though it is also the least frequent. Only Oceania does not feature a Nuclear power plant and is instead led in capacity by Coal, which is second for all others in average capacty.
+
+```{r}
+  q7 <- db %>%
+  # filter out Antarctica and keep renewables only
+    filter(continent != "Antarctica") %>%
+    filter(primary_fuel %in% c("Solar", "Hydro", "Wind", "Gas", "Coal", "Oil", "Nuclear")) %>%
+    group_by(continent, primary_fuel) %>% # group by both continent and fuel type
+  # store average, count, and renewable binary variable
+    summarize(mean_cap = mean(capacity_mw), count=n(), renewable=max(renewable)) 
+
+p <- ggplot(q7, aes(x=count, y=mean_cap, color=renewable)) + 
+  geom_point(size=3) + 
+  scale_color_manual(values=c("black", "darkgreen"), name="") + 
+  scale_y_continuous(label=label_comma(suffix=" mwh")) + # add a comma and suffice
+  scale_x_continuous(label=label_comma()) + # add a comma to the thousnads
+  geom_text_repel(aes(label=primary_fuel), show.legend=FALSE) +  # add in repelled text
+  labs(x="Number of Power Plants", y="Average Capacity of Power Plants",
+       title="Non-Renewable, High Capacity vs Renewable, Low Capacity",
+       subtitle="Average capacity and number of plants per primary fuel on each continent") + 
+  theme_minimal() + 
+  theme(legend.position="bottom")
+
+p + facet_wrap(vars(continent), nrow=2, scales="free") # allow for both x and y to vary as needed
+```
+
+#### Conclusion
+
+On the whole, this brief exploration suggests that at present, while the number of power plants utilizing renewable energy has served in the last 20 years, they still lag in competitive capacity when compared to non-renewable sources. Even so, there are some renewable source plants, based on the above analysis, that can compete with higher capacity facilities, which suggests that these trends may even out in the future with additional research, innovation, and resources. Even this simple investigation highlights the complexity of a global shift from non-renewable to renewable energy sources at scale, not taking into account a myriad of political, economic, or social dynamics that complicate these considerations.

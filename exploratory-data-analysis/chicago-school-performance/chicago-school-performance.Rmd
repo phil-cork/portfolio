@@ -1,0 +1,103 @@
+---
+title: "EDA: Chicago School Performance"
+output: html_document
+date: "2025-02-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+
+library(tidyverse)
+library(countrycode)
+library(scales)
+library(ggrepel)
+library(extrafont)
+```
+
+## Chicago Schools
+
+This dataset includes a year's worth of data regarding Chicago school performance. Included are a variety of scores for aspects like the school's safety, environmental features, teacher performance, and parent involvement, both in numeric and categorical varieties. Below, we explore the potential correlation between a few of these scores.
+
+```{r}
+# load in dataset of choice
+cs <- read.csv("chicago_schools.csv")
+```
+
+
+
+#### Yearly Progress Tied to Teacher Scores
+
+Unsurprisingly, there seems to be a correlation between how teachers were scored categorically and what percent of schools met the threshold for meeting the Adequate Yearly Progress threshold. It is worth noting, however, that even for schools with Very Strong teacher scores, roughly 2/3 of schools still did not meet this threshold.
+
+```{r}
+# remove instances where data is removed for privacy reasons
+q8 <- cs %>%
+  filter(teachers_icon != "NDA" & adequate_yearly_progress_made != "NDA") 
+# store categorical values for customizing axes
+scores <- c("Very Weak", "Weak", "Average", "Strong", "Very Strong") 
+
+ggplot(q8, aes(y=teachers_icon, fill=adequate_yearly_progress_made)) + 
+  geom_bar(position="fill") + 
+  labs(y="Teacher Scores", x="Proportion of Schools", title="Yearly Progress Tied to Teacher Quality", subtitle="Chicago Public Schools, 2011-2012") +
+  # customize color and legend title
+  scale_fill_manual(values=c("#D81B60", "#004D40"), name="Adequate Yearly Progress Made") + 
+  scale_y_discrete(limits = scores) + # display custom values
+  scale_x_continuous(labels=label_percent()) +
+  theme(text=element_text(family="serif")) +  # customize text appearance
+  theme_minimal() + 
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+
+#### School Environment & Safety Score
+
+Aggregating the School Environment score into the included "Icon" categories used in the dataset, a clear trend arises between the environment and the School Safety score. This box plot highlights the distinct differences in the median scores, but also show that for each category, the interquartile ranges cover a good portion of both the category above and below. As such, while there is a notable correlation, the two features don't exclusviely move in lockstep with one another.
+
+```{r}
+medians <- cs %>% # similar to question above, store calculated medians separately
+  select(safety_score, environment_icon) %>%
+  group_by(environment_icon) %>%
+  summarize(med_safety=median(safety_score))
+
+q9 <- merge(cs, medians) %>% # merge medians, then drop NDA observations so that each observation includes the median for its respective category
+  filter(environment_icon != "NDA")
+
+# plot safety by environment, reordered by the median safety measure. Use the median for fill as well to highlight the gradual shift as the categorical features for environment change
+ggplot(q9, aes(x=safety_score, y=reorder(environment_icon, med_safety), fill=as.factor(med_safety))) + 
+  geom_boxplot(na.rm=TRUE) + # remove outliers
+  labs(x="Safety Score", y="School Environment", title="School Environment & Safety Go Hand in Hand",
+       subtitle="Chicago Public Schools, 2011-2012") + 
+  theme_minimal() + 
+  theme(legend.position="none", text=element_text(family='mono')) + # change font family and remove legend
+    scale_fill_brewer(palette="BuPu") # choose a palette that indicates categories are related, but distinct values
+  
+```
+
+
+#### Family Involvement & School Safety
+
+Comparing the safety and environmental scores of schools, we find a clear trend in which schools with Very Strong Family Involvement scores tends to score higher in both categories. Only one school with Very Strong Family Involvement is not in the upper-half of scores for both features.
+
+```{r}
+# transform discrete variable to binary for filtering
+q10 <- cs %>%
+  mutate(strong_family = ifelse(family_involvement_icon=="Very Strong","Yes", "No")) 
+
+# plot safety and environment, highlight the newly created binary variable
+ggplot(q10, aes(x=safety_score, y=environment_score, color=strong_family)) + 
+  geom_point(na.rm=TRUE) + 
+  # scale color so that only binary output of interest is visually highlighted
+  scale_color_manual(values=c("lightgrey", "darkblue"), name="Very Strong Family Involvement") + 
+  # create dashed lines that show x and y axis averages
+  geom_hline(yintercept=mean(q10$environment_score, na.rm=TRUE), linetype = 'dashed', alpha=.4) + 
+  geom_vline(xintercept=mean(q10$safety_score, na.rm=TRUE), linetype='dashed', alpha=.4) + 
+  labs(x="School Safety Score",y="School Environment Score", title="Very Strong Family Involvement Correlated with Safe Environments", subtitle="Chicago Public Schools, 2011-2012") + 
+  theme_minimal()
+```
+
+#### Conclusion
+
+Even in this brief investigation, it is apparent the strong correlation between a school's environmental factors, its safety, and the involvement of parents. These features represent only a handful of many conflating factors determining a school's performance, including the quality of instructors. The correlations uncovered further confirm expected trends, but also denote the substantial challenges facing instructors and school administrators in increasing the number of schools achieving the necessary progress thresholds each year.
